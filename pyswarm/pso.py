@@ -87,7 +87,7 @@ def pso(func, lb, ub, ieqcons=[], f_ieqcons=None, args=(), kwargs={},
         The objective values at each position in p
    
     """
-   
+
     assert len(lb)==len(ub), 'Lower- and upper-bounds must be the same length'
     assert hasattr(func, '__call__'), 'Invalid function handle'
     lb = np.array(lb)
@@ -99,7 +99,7 @@ def pso(func, lb, ub, ieqcons=[], f_ieqcons=None, args=(), kwargs={},
 
     # Initialize objective function
     obj = partial(_obj_wrapper, func, args, kwargs)
-    
+        
     # Check for constraint function(s) #########################################
     if f_ieqcons is None:
         if not len(ieqcons):
@@ -118,8 +118,20 @@ def pso(func, lb, ub, ieqcons=[], f_ieqcons=None, args=(), kwargs={},
 
     # Initialize the multiprocessing module if necessary
     if processes > 1:
-        import multiprocessing
-        mp_pool = multiprocessing.Pool(processes)
+        
+        #### use Dask for parallelizing on the HPC
+        from distributed import Client
+        from dask_jobqueue import SLURMCluster
+        
+        # set up SLURM Cluster *** not sure about walltime - may need to make this an input
+        cluster = SLURMCluster(
+            cores = processes,
+            memory = '200GB',
+            account = 'fad',
+            walltime ='01:00:00',
+            processes = processes)
+        cluster.scale(processes)
+        client = Client(cluster)
         
     # Initialize the particle swarm ############################################
     S = swarmsize
@@ -138,12 +150,22 @@ def pso(func, lb, ub, ieqcons=[], f_ieqcons=None, args=(), kwargs={},
 
     # Calculate objective and constraints for each particle
     if processes > 1:
-        fx = np.array(mp_pool.map(obj, x))
-        fs = np.array(mp_pool.map(is_feasible, x))
+        # submit batch jobs of objective function calculation
+        fx = client.map(func,x)
+        fx = client.gather(fx)
+
+        #submit batch jobs of constraint calculation
+        fs = client.map(is_feasible,x)
+        fs = client.gather(fs)
     else:
         for i in range(S):
             fx[i] = obj(x[i, :])
             fs[i] = is_feasible(x[i, :])
+
+    # convert to arrays    
+    fs = np.array(fs)
+    fx = np.array(fx)
+
        
     # Store particle's best position (if constraints are satisfied)
     i_update = np.logical_and((fx < fp), fs)
@@ -180,12 +202,25 @@ def pso(func, lb, ub, ieqcons=[], f_ieqcons=None, args=(), kwargs={},
 
         # Update objectives and constraints
         if processes > 1:
-            fx = np.array(mp_pool.map(obj, x))
-            fs = np.array(mp_pool.map(is_feasible, x))
+
+            # submit batch jobs of the objective function calculation
+            fx = client.map(func,x)
+            fx = client.gather(fx)
+            # submit batch jobs of the constraint calculation
+            fs = client.map(is_feasible,x)
+            fs = client.gather(fs)
         else:
             for i in range(S):
                 fx[i] = obj(x[i, :])
                 fs[i] = is_feasible(x[i, :])
+        # convert to arrays
+        fs = np.array(fs)
+        fx = np.array(fx)
+
+        # save text files of design variables, objective, constraints
+        np.savetxt('fs' +str(it) +'.txt',fs)
+        np.savetxt('fx' +str(it) +'.txt',fx)
+        np.savetxt('x' +str(it) +'.txt',x)
 
         # Store particle's best position (if constraints are satisfied)
         i_update = np.logical_and((fx < fp), fs)
